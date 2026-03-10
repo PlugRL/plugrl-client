@@ -39,12 +39,19 @@ class MessageType(enum.Enum):
         return self.value
 
 class WebSocketWorkerAgent(_base_agent.BaseAgent):
-    def __init__(self, host: str = "0.0.0.0", port: Optional[int] = None, api_key: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        host: str = "0.0.0.0",
+        port: Optional[int] = None,
+        api_key: Optional[str] = None,
+        reconnect_on_server_stop: bool = False,
+    ) -> None:
         self._uri = f"ws://{host}"
         if port is not None:
             self._uri += f":{port}"
         self._packer = msgpack_numpy.Packer()
         self._api_key = api_key
+        self._reconnect_on_server_stop = reconnect_on_server_stop
         # Initial connection upon agent creation
         self._ws, self._server_metadata = self._wait_for_server()
 
@@ -87,6 +94,13 @@ class WebSocketWorkerAgent(_base_agent.BaseAgent):
             except ConnectionClosedOK as e:
                 close_code, close_reason = _get_close_details(e)
                 if close_reason == SERVER_STOP_REASON:
+                    if self._reconnect_on_server_stop:
+                        logger.info(
+                            "Server requested worker shutdown while reconnecting, "
+                            f"but reconnect_on_server_stop is enabled. Retrying in {RECONNECT_DELAY} seconds..."
+                        )
+                        time.sleep(RECONNECT_DELAY)
+                        continue
                     raise ServerStopped(
                         "Server requested worker shutdown while reconnecting."
                     ) from e
@@ -137,6 +151,12 @@ class WebSocketWorkerAgent(_base_agent.BaseAgent):
                 close_code, close_reason = _get_close_details(e)
                 self._close_connection()
                 if close_reason == SERVER_STOP_REASON:
+                    if self._reconnect_on_server_stop:
+                        logger.info(
+                            "Server requested worker shutdown during INFER/ACTION exchange, "
+                            "but reconnect_on_server_stop is enabled. Waiting for server to come back and retrying..."
+                        )
+                        continue
                     raise ServerStopped(
                         "Server requested worker shutdown after algorithm stop."
                     ) from e
@@ -176,6 +196,12 @@ class WebSocketWorkerAgent(_base_agent.BaseAgent):
                 close_code, close_reason = _get_close_details(e)
                 self._close_connection()
                 if close_reason == SERVER_STOP_REASON:
+                    if self._reconnect_on_server_stop:
+                        logger.info(
+                            "Server requested worker shutdown during FEEDBACK send, "
+                            "but reconnect_on_server_stop is enabled. Waiting for server to come back and retrying..."
+                        )
+                        continue
                     raise ServerStopped(
                         "Server requested worker shutdown after algorithm stop."
                     ) from e
