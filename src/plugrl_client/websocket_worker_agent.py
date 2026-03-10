@@ -14,9 +14,19 @@ from websockets.exceptions import (
 from plugrl_client import base_agent as _base_agent
 from plugrl_client import msgpack_numpy
 
+SERVER_STOP_REASON = "plugrl-server-stop"
+
+
+def _get_close_details(exc: ConnectionClosed) -> tuple[int | None, str]:
+    if exc.rcvd is not None:
+        return exc.rcvd.code, exc.rcvd.reason
+    if exc.sent is not None:
+        return exc.sent.code, exc.sent.reason
+    return None, ""
+
 
 class ServerStopped(RuntimeError):
-    """Raised when the server closes the websocket normally during shutdown."""
+    """Raised when the server explicitly requests workers to stop."""
 
     pass
 
@@ -112,8 +122,18 @@ class WebSocketWorkerAgent(_base_agent.BaseAgent):
                 # Success
                 return msgpack_numpy.unpackb(response)["data"]
             except ConnectionClosedOK as e:
+                close_code, close_reason = _get_close_details(e)
                 self._close_connection()
-                raise ServerStopped(f"Server closed the connection normally: {e}") from e
+                if close_reason == SERVER_STOP_REASON:
+                    raise ServerStopped(
+                        "Server requested worker shutdown after algorithm stop."
+                    ) from e
+                logger.warning(
+                    "Connection closed normally during INFER/ACTION exchange. "
+                    f"Waiting for server to come back and retrying... code={close_code}, "
+                    f"reason={close_reason or '<empty>'}"
+                )
+                continue
                 
             except ConnectionClosedError as e:
                 logger.warning(f"Connection closed during INFER/ACTION exchange. Error: {e}")
@@ -141,8 +161,18 @@ class WebSocketWorkerAgent(_base_agent.BaseAgent):
                 # Success
                 return
             except ConnectionClosedOK as e:
+                close_code, close_reason = _get_close_details(e)
                 self._close_connection()
-                raise ServerStopped(f"Server closed the connection normally: {e}") from e
+                if close_reason == SERVER_STOP_REASON:
+                    raise ServerStopped(
+                        "Server requested worker shutdown after algorithm stop."
+                    ) from e
+                logger.warning(
+                    "Connection closed normally during FEEDBACK send. "
+                    f"Waiting for server to come back and retrying... code={close_code}, "
+                    f"reason={close_reason or '<empty>'}"
+                )
+                continue
             except ConnectionClosedError as e:
                 logger.warning(f"Connection closed during FEEDBACK send. Error: {e}")
                 self._close_connection()
