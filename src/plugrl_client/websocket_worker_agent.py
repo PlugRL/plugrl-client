@@ -5,10 +5,20 @@ from typing import Dict, Optional, Tuple
 from typing_extensions import override
 from loguru import logger
 import websockets.sync.client
-from websockets.exceptions import ConnectionClosedError
+from websockets.exceptions import (
+    ConnectionClosed,
+    ConnectionClosedError,
+    ConnectionClosedOK,
+)
 
 from plugrl_client import base_agent as _base_agent
 from plugrl_client import msgpack_numpy
+
+
+class ServerStopped(RuntimeError):
+    """Raised when the server closes the websocket normally during shutdown."""
+
+    pass
 
 class MessageType(enum.Enum):
     INFER = "infer"
@@ -27,6 +37,16 @@ class WebSocketWorkerAgent(_base_agent.BaseAgent):
         self._api_key = api_key
         # Initial connection upon agent creation
         self._ws, self._server_metadata = self._wait_for_server()
+
+    def _close_connection(self) -> None:
+        if self._ws is None:
+            return
+        try:
+            self._ws.close()
+        except Exception:
+            pass
+        finally:
+            self._ws = None
         
     def get_server_metadata(self) -> Dict:
         return self._server_metadata
@@ -54,7 +74,7 @@ class WebSocketWorkerAgent(_base_agent.BaseAgent):
                 logger.info("Successfully received server metadata.")
                 return conn, metadata_msg["data"]
                 
-            except (ConnectionRefusedError, TimeoutError, ConnectionClosedError):
+            except (ConnectionRefusedError, TimeoutError, ConnectionClosed):
                 logger.warning(f"Server not available or connection failed. Retrying in {RECONNECT_DELAY} seconds...")
                 time.sleep(RECONNECT_DELAY)
             except Exception as e:
@@ -74,13 +94,16 @@ class WebSocketWorkerAgent(_base_agent.BaseAgent):
         """Sends an observation and waits for the action, retrying on connection failure."""
         while True:
             self._ensure_connection()
+            ws = self._ws
+            if ws is None:
+                raise RuntimeError("WebSocket connection is not available.")
             try:
                 # 1. Send INFER
                 packed_data = self._packer.pack(dict(message_type=str(MessageType.INFER), data=obs))
-                self._ws.send(packed_data)
+                ws.send(packed_data)
                 
                 # 2. Receive ACTION
-                response = self._ws.recv()
+                response = ws.recv()
                 
                 if isinstance(response, str):
                     # The server sent a string, indicating a server error.
@@ -88,14 +111,16 @@ class WebSocketWorkerAgent(_base_agent.BaseAgent):
                 
                 # Success
                 return msgpack_numpy.unpackb(response)["data"]
+            except ConnectionClosedOK as e:
+                self._close_connection()
+                raise ServerStopped(f"Server closed the connection normally: {e}") from e
                 
             except ConnectionClosedError as e:
                 logger.warning(f"Connection closed during INFER/ACTION exchange. Error: {e}")
-                self._ws.close()
-                self._ws = None
+                self._close_connection()
                 continue # Retry the entire operation
             except Exception:
-                self._ws.close()
+                self._close_connection()
                 raise
 
     @override
@@ -103,22 +128,27 @@ class WebSocketWorkerAgent(_base_agent.BaseAgent):
         """Sends feedback data, retrying on connection failure."""
         while True:
             self._ensure_connection()
+            ws = self._ws
+            if ws is None:
+                raise RuntimeError("WebSocket connection is not available.")
             try:
                 packed_data = self._packer.pack(dict(
                     message_type=str(MessageType.FEEDBACK),
                     data=dict(obs=obs, rewards=rewards, terminated=terminated, truncated=truncated, info=info)
                 ))
-                self._ws.send(packed_data)
+                ws.send(packed_data)
                 
                 # Success
                 return
+            except ConnectionClosedOK as e:
+                self._close_connection()
+                raise ServerStopped(f"Server closed the connection normally: {e}") from e
             except ConnectionClosedError as e:
                 logger.warning(f"Connection closed during FEEDBACK send. Error: {e}")
-                self._ws.close()
-                self._ws = None
+                self._close_connection()
                 continue # Retry the send operation
             except Exception:
-                self._ws.close()
+                self._close_connection()
                 raise
 
     @override
