@@ -15,6 +15,7 @@ from plugrl_client import base_agent as _base_agent
 from plugrl_client import msgpack_numpy
 
 SERVER_STOP_REASON = "plugrl-server-stop"
+SERVER_RESYNC_REASON = "plugrl-server-resync"
 
 
 def _get_close_details(exc: ConnectionClosed) -> tuple[int | None, str]:
@@ -160,6 +161,12 @@ class WebSocketWorkerAgent(_base_agent.BaseAgent):
                     raise ServerStopped(
                         "Server requested worker shutdown after algorithm stop."
                     ) from e
+                if close_reason == SERVER_RESYNC_REASON:
+                    logger.info(
+                        "Server requested session resync during INFER/ACTION exchange. "
+                        "Waiting for server to come back and retrying..."
+                    )
+                    continue
                 logger.warning(
                     "Connection closed normally during INFER/ACTION exchange. "
                     f"Waiting for server to come back and retrying... code={close_code}, "
@@ -205,6 +212,12 @@ class WebSocketWorkerAgent(_base_agent.BaseAgent):
                     raise ServerStopped(
                         "Server requested worker shutdown after algorithm stop."
                     ) from e
+                if close_reason == SERVER_RESYNC_REASON:
+                    logger.info(
+                        "Server requested session resync during FEEDBACK send. "
+                        "Dropping stale feedback and resuming from the next infer request."
+                    )
+                    return
                 logger.warning(
                     "Connection closed normally during FEEDBACK send. "
                     f"Waiting for server to come back and retrying... code={close_code}, "
