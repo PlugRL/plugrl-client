@@ -84,7 +84,19 @@ class WebSocketWorkerAgent(_base_agent.BaseAgent):
                 logger.info("Successfully received server metadata.")
                 return conn, metadata_msg["data"]
                 
-            except (ConnectionRefusedError, TimeoutError, ConnectionClosed):
+            except ConnectionClosedOK as e:
+                close_code, close_reason = _get_close_details(e)
+                if close_reason == SERVER_STOP_REASON:
+                    raise ServerStopped(
+                        "Server requested worker shutdown while reconnecting."
+                    ) from e
+                logger.warning(
+                    "Server closed the connection during metadata exchange. "
+                    f"Retrying in {RECONNECT_DELAY} seconds... code={close_code}, "
+                    f"reason={close_reason or '<empty>'}"
+                )
+                time.sleep(RECONNECT_DELAY)
+            except (ConnectionRefusedError, TimeoutError, ConnectionClosedError):
                 logger.warning(f"Server not available or connection failed. Retrying in {RECONNECT_DELAY} seconds...")
                 time.sleep(RECONNECT_DELAY)
             except Exception as e:
